@@ -12,8 +12,9 @@ An [MCP](https://modelcontextprotocol.io/) server that brings DuckDuckGo search 
 | `ddg_news` | Recent news article search |
 | `ddg_images` | Image search with size, colour, and type filters |
 | `ddg_videos` | Video search (aggregates YouTube, Bing Videos, etc.) |
+| `ddg_fetch` | **NEW** — Fetch a URL and extract readable content (article body, headings, metadata). Uses [trafilatura](https://trafilatura.readthedocs.io/) to strip navigation, ads, and boilerplate. |
 
-Every tool supports `region` (e.g. `us-en`, `uk-en`, `wt-wt`), `safesearch` (`on` / `moderate` / `off`), and time-limit filters.
+Every search tool supports `region` (e.g. `us-en`, `uk-en`, `wt-wt`), `safesearch` (`on` / `moderate` / `off`), and time-limit filters.
 
 ## Quick Start
 
@@ -169,9 +170,10 @@ See `AGENTS.md` for full conventions — the short version:
    def ddg_my_tool(query: str, max_results: int = 10) -> list[dict]:
        """Description for LLMs."""
        ddgs = _make_ddgs()
-       results = ddgs.some_method(keywords=query, max_results=_clamp(max_results, 1, 50))
+       results = ddgs.some_method(query=query, max_results=_clamp(max_results, 1, 50))
        return [_safe_result(r) for r in results]
    ```
+   For web-fetch tools, use `httpx` + `trafilatura` (see `ddg_fetch` for the pattern).
 2. Add tests in `tests/test_server.py`.
 
 ## License

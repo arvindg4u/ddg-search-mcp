@@ -7,7 +7,8 @@ Model Context Protocol (MCP).  Runs on Streamable HTTP transport.
 Designed for Render deployment via the included render.yaml Blueprint.
 Built with:
   - fastmcp 3.x  — MCP server framework
-  - ddgs 8.x     — DuckDuckGo search library (no API key required)
+  - ddgs 9.x     — DuckDuckGo search library (no API key required)
+  - trafilatura  — Web page content extraction for ddg_fetch
 
 Usage
 -----
@@ -27,6 +28,8 @@ import hmac
 import os
 from typing import Any
 
+import httpx
+import trafilatura
 import uvicorn
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -53,14 +56,15 @@ mcp = FastMCP(
     name="ddg-search",
     version="1.0.0",
     instructions="""\
-This server provides DuckDuckGo search capabilities through four tools:
+This server provides DuckDuckGo search capabilities and web page fetching:
 
 - **ddg_search**:  General web search (supports filetype:, site: operators)
 - **ddg_news**:    Recent news article search
 - **ddg_images**:  Image search (size, colour, type filters)
 - **ddg_videos**:  Video search (resolution, duration filters)
+- **ddg_fetch**:   Fetch and extract readable content from a URL
 
-Each tool accepts a `region` parameter (e.g. us-en, uk-en, wt-wt for worldwide),
+Each search tool accepts a `region` parameter (e.g. us-en, uk-en, wt-wt for worldwide),
 a `safesearch` filter (on / moderate / off), and time-limit filters.""",
 )
 
@@ -249,6 +253,119 @@ def ddg_videos(
         max_results=_clamp(max_results, 1, 50),
     )
     return [_safe_result(r) for r in results]
+
+
+# ---------------------------------------------------------------------------
+# Web fetch tool
+# ---------------------------------------------------------------------------
+
+FETCH_TIMEOUT = int(os.getenv("DDGS_TIMEOUT", "30"))
+FETCH_USER_AGENT = (
+    "Mozilla/5.0 (compatible; DDGSearchBot/1.0; "
+    "https://ddg-search-mcp.onrender.com)"
+)
+MAX_FETCH_SIZE = 5_000_000  # 5 MB
+
+
+@mcp.tool(
+    name="ddg_fetch",
+    description=(
+        "Fetch a URL and extract its main readable content (article body, "
+        "headings, and metadata).  Returns the page title, extracted text, "
+        "and source URL.  Useful for reading full articles after a search."
+    ),
+)
+def ddg_fetch(
+    url: str,
+    max_chars: int = 10_000,
+) -> dict[str, str]:
+    """Fetch and extract readable content from a URL.
+
+    Uses trafilatura to extract the main article content, stripping
+    navigation, ads, and boilerplate.
+
+    Args:
+        url:        The full URL (http:// or https://) to fetch.
+        max_chars:  Maximum characters of extracted text to return (500–50_000).
+                   Defaults to 10_000.
+
+    Returns:
+        Dict with keys: url, title, text, content_type.
+        If extraction fails, text contains the raw HTML title or error message.
+    """
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    max_chars = _clamp(max_chars, 500, 50_000)
+
+    try:
+        with httpx.Client(
+            timeout=FETCH_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": FETCH_USER_AGENT},
+        ) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+
+            # Guard against huge responses
+            content = resp.content
+            if len(content) > MAX_FETCH_SIZE:
+                content = content[:MAX_FETCH_SIZE]
+            html = resp.text
+
+        # Extract readable content
+        extracted = trafilatura.extract(
+            html,
+            output_format="txt",
+            include_links=True,
+            include_tables=True,
+        )
+
+        title = trafilatura.extract(html, output_format="txt")
+        if not title:
+            # Fallback: grab <title> via simple regex
+            import re
+            m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            title = m.group(1).strip() if m else url
+
+        if extracted:
+            text = extracted[:max_chars]
+        else:
+            # Fallback: return first meaningful text block
+            import re
+            # Strip tags, get body text
+            body = re.sub(r"<[^>]+>", " ", html)
+            body = re.sub(r"\s+", " ", body).strip()
+            text = body[:max_chars] if body else f"Could not extract content from {url}"
+
+        return {
+            "url": str(resp.url),
+            "title": title if isinstance(title, str) else url,
+            "text": text,
+            "content_type": resp.headers.get("content-type", "unknown"),
+        }
+
+    except httpx.HTTPStatusError as e:
+        return {
+            "url": url,
+            "title": "HTTP Error",
+            "text": f"HTTP {e.response.status_code}: {e.response.reason_phrase}",
+            "content_type": "error",
+        }
+    except httpx.TimeoutException:
+        return {
+            "url": url,
+            "title": "Timeout",
+            "text": f"Request timed out after {FETCH_TIMEOUT}s",
+            "content_type": "error",
+        }
+    except Exception as e:
+        return {
+            "url": url,
+            "title": "Error",
+            "text": f"Failed to fetch URL: {type(e).__name__}: {e}",
+            "content_type": "error",
+        }
 
 
 # ---------------------------------------------------------------------------

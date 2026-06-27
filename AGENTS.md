@@ -11,7 +11,7 @@ auth and health checks.  Deployed on Render.
 
 - **Server**: `server.py` — FastAPI app with FastMCP mounted at `/mcp`
 - **Tests**: `tests/test_server.py` — pytest, using `unittest.mock`
-- **Deps**: `requirements.txt` — fastmcp, ddgs, fastapi, uvicorn
+- **Deps**: `requirements.txt` — fastmcp, ddgs, trafilatura, uvicorn
 
 ## How to add a new tool
 

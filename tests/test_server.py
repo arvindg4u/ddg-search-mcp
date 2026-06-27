@@ -1,13 +1,13 @@
 """Tests for the DuckDuckGo Search MCP server."""
 
 import os
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from httpx import AsyncClient, ASGITransport
 from contextlib import asynccontextmanager
 
-from server import ddg_search, ddg_news, ddg_images, ddg_videos, create_app
+from server import ddg_search, ddg_news, ddg_images, ddg_videos, ddg_fetch, create_app, _clamp
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +205,67 @@ async def test_mcp_tools_list():
     assert "ddg_news" in body
     assert "ddg_images" in body
     assert "ddg_videos" in body
+    assert "ddg_fetch" in body
+
+
+# ===================================================================
+# ddg_fetch tests
+# ===================================================================
+
+@patch("server.httpx.Client")
+@patch("server.trafilatura.extract")
+def test_ddg_fetch_basic(mock_extract, mock_client):
+    """Mock HTTP and trafilatura to test ddg_fetch logic."""
+    mock_extract.return_value = "Extracted article content here."
+    mock_response = MagicMock()
+    mock_response.text = "<html><title>Test Page</title><body>Content</body></html>"
+    mock_response.content = b"<html><body>Content</body></html>"
+    mock_response.url = "https://example.com/page"
+    mock_response.headers = {"content-type": "text/html"}
+    mock_response.raise_for_status = MagicMock()
+    mock_client.return_value.__enter__.return_value.get.return_value = mock_response
+
+    result = ddg_fetch(url="https://example.com/page")
+
+    assert result["title"] == "Extracted article content here."
+    assert result["url"] == "https://example.com/page"
+    assert result["content_type"] == "text/html"
+
+
+@patch("server.httpx.Client")
+@patch("server.trafilatura.extract")
+def test_ddg_fetch_url_scheme_added(mock_extract, mock_client):
+    """ddg_fetch auto-prepends https:// if missing."""
+    mock_extract.return_value = "Content"
+    mock_response = MagicMock()
+    mock_response.text = "<html><title>X</title></html>"
+    mock_response.content = b"<html></html>"
+    mock_response.url = "https://example.com"
+    mock_response.headers = {"content-type": "text/html"}
+    mock_response.raise_for_status = MagicMock()
+    mock_client.return_value.__enter__.return_value.get.return_value = mock_response
+
+    result = ddg_fetch(url="example.com")
+    assert "https://example.com" in result["url"]
+
+
+@patch("server.httpx.Client")
+@patch("server.trafilatura.extract")
+def test_ddg_fetch_handles_http_error(mock_extract, mock_client):
+    """ddg_fetch returns error dict on HTTP failure."""
+    from httpx import HTTPStatusError, Request
+
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.reason_phrase = "Not Found"
+    mock_response.raise_for_status.side_effect = HTTPStatusError(
+        "404", request=Request("GET", "https://example.com/bad"), response=mock_response
+    )
+    mock_client.return_value.__enter__.return_value.get.return_value = mock_response
+
+    result = ddg_fetch(url="https://example.com/bad")
+    assert "HTTP 404" in result["text"]
+    assert result["content_type"] == "error"
 
 
 @pytest.mark.asyncio
