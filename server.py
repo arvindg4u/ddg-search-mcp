@@ -121,7 +121,7 @@ def ddg_search(
     """
     ddgs = _make_ddgs()
     results = ddgs.text(
-        keywords=query,
+        query=query,
         region=region,
         safesearch=safesearch,
         timelimit=timelimit,
@@ -155,7 +155,7 @@ def ddg_news(
     """
     ddgs = _make_ddgs()
     results = ddgs.news(
-        keywords=query,
+        query=query,
         region=region,
         safesearch=safesearch,
         timelimit=timelimit,
@@ -198,7 +198,7 @@ def ddg_images(
     """
     ddgs = _make_ddgs()
     results = ddgs.images(
-        keywords=query,
+        query=query,
         region=region,
         safesearch=safesearch,
         timelimit=timelimit,
@@ -240,7 +240,7 @@ def ddg_videos(
     """
     ddgs = _make_ddgs()
     results = ddgs.videos(
-        keywords=query,
+        query=query,
         region=region,
         safesearch=safesearch,
         timelimit=timelimit,
