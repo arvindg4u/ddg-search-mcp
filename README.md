@@ -39,7 +39,7 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "ddg-search": {
       "type": "streamable-http",
-      "url": "https://your-service.onrender.com/mcp",
+      "url": "https://ddg-search-mcp.onrender.com/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN"
       }
@@ -55,7 +55,7 @@ Add to `.cursor/mcp.json`:
 {
   "mcpServers": {
     "ddg-search": {
-      "url": "https://your-service.onrender.com/mcp",
+      "url": "https://ddg-search-mcp.onrender.com/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN"
       }
@@ -73,7 +73,7 @@ Add to your MCP configuration:
     {
       "type": "mcp",
       "name": "ddg-search",
-      "url": "https://your-service.onrender.com/mcp",
+      "url": "https://ddg-search-mcp.onrender.com/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_TOKEN"
       }
@@ -108,9 +108,16 @@ After deploy, find your auto-generated token in **Environment** or generate one:
 openssl rand -base64 32
 ```
 
-### Free plan note
+### Free plan & keep-alive
 
-Render's free services spin down after 15 minutes of inactivity, causing 30–60s cold starts. For reliable production use, upgrade to a paid plan.
+Render's free services spin down after **15 minutes of inactivity**, causing 30–60s cold starts. This repo includes a **GitHub Actions keep-alive cron** (`.github/workflows/keep-alive.yml`) that pings the health endpoint every 10 minutes to prevent spin-down.
+
+To enable it:
+1. Go to your repo on GitHub → **Actions** tab.
+2. Enable GitHub Actions (if prompted).
+3. The `Keep Render Alive` workflow runs automatically on the `*/10 * * * *` schedule.
+
+> **Note:** GitHub Actions has a [usage limit](https://docs.github.com/en/billing/managing-billing-for-github-actions/about-billing-for-github-actions) on free plans (2,000 minutes/month). This workflow uses ~4,500 minutes/year (~375 min/month) — well within the free tier. For guaranteed zero latency, upgrade to Render's Starter plan ($7/mo).
 
 ## Environment Variables
 

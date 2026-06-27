@@ -1,0 +1,22 @@
+name: Keep Render Alive
+
+on:
+  schedule:
+    # Every 10 minutes — Render free tier spins down after 15 min of inactivity.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: |
+          echo "Pinging https://ddg-search-mcp.onrender.com/health ..."
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+            "https://ddg-search-mcp.onrender.com/health")
+          echo "HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Health check failed!" && exit 1
+          fi
+          echo "Server is alive ✅"
