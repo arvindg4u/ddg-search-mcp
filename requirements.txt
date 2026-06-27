@@ -1,0 +1,4 @@
+fastmcp>=3.0.0
+ddgs>=8.1.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0

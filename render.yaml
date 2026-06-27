@@ -1,0 +1,21 @@
+# Render Blueprint — one-click deploy
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: ddg-search-mcp
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.0
+      - key: MCP_API_TOKEN
+        generateValue: true
+      - key: DDGS_TIMEOUT
+        value: 10
+      - key: PORT
+        value: 10000
