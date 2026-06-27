@@ -23,18 +23,13 @@ Env vars
 
 from __future__ import annotations
 
+import hmac
 import os
-import re
 from typing import Any
 
 import uvicorn
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.middleware.cors import CORSMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from fastmcp import FastMCP
 
@@ -46,11 +41,12 @@ PORT = int(os.getenv("PORT", "10000"))
 MCP_API_TOKEN = os.getenv("MCP_API_TOKEN", "")
 DDGS_TIMEOUT = int(os.getenv("DDGS_TIMEOUT", "10"))
 DDGS_PROXY = os.getenv("DDGS_PROXY", "") or None
+RENDER_EXTERNAL_HOSTNAME = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 
 AUTH_ENABLED = bool(MCP_API_TOKEN)
 
 # ---------------------------------------------------------------------------
-# MCP Server — single responsibility: web search via DuckDuckGo
+# MCP Server
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP(
@@ -72,6 +68,7 @@ a `safesearch` filter (on / moderate / off), and time-limit filters.""",
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_ddgs():
     """Return a configured DDGS instance."""
@@ -255,59 +252,77 @@ def ddg_videos(
 
 
 # ---------------------------------------------------------------------------
-# Starlette application  (wraps MCP with auth + health-check)
+# Health endpoint (bypasses auth — custom_route makes it public)
 # ---------------------------------------------------------------------------
 
 
-async def _health(request: Request) -> JSONResponse:
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Any) -> JSONResponse:
     """Render health-check endpoint."""
     return JSONResponse({"status": "ok", "service": "ddg-search-mcp"})
 
 
-class AuthMiddleware(BaseHTTPMiddleware):
+# ---------------------------------------------------------------------------
+# Bearer auth middleware (ASGI-level, same pattern as Render template)
+# ---------------------------------------------------------------------------
+
+
+class BearerAuthMiddleware:
     """Reject unauthenticated requests when MCP_API_TOKEN is set."""
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        if not AUTH_ENABLED:
-            return await call_next(request)
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-        # Allow health checks without auth.
-        if request.url.path == "/health":
-            return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        # Only protect HTTP paths; skip health (it has its own route).
+        if scope["type"] != "http" or scope["path"] == "/health":
+            await self.app(scope, receive, send)
+            return
 
-        auth_header = request.headers.get("authorization", "")
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode()
         expected = f"Bearer {MCP_API_TOKEN}"
 
-        if auth_header != expected:
-            return Response(
-                status_code=401,
-                content='{"error":"Unauthorized"}',
-                media_type="application/json",
-            )
+        # Constant-time comparison to prevent timing side-channel attacks.
+        if hmac.compare_digest(auth, expected):
+            await self.app(scope, receive, send)
+            return
 
-        return await call_next(request)
+        response = JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "error": {"code": -32001, "message": "Unauthorized"},
+                "id": None,
+            },
+            status_code=401,
+        )
+        await response(scope, receive, send)
 
 
-# Build the ASGI app.
-app = Starlette(
-    routes=[
-        Route("/health", endpoint=_health, methods=["GET"]),
-    ],
-    middleware=[
-        Middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["*"],
-            allow_headers=["*"],
-        ),
-        Middleware(AuthMiddleware),
-    ],
-)
+# ---------------------------------------------------------------------------
+# App factory
+# ---------------------------------------------------------------------------
 
-# Mount the MCP server's internal ASGI app at /mcp.
-app.mount("/mcp", mcp.http_app())
+
+def create_app():
+    """Build and return the ASGI app.
+
+    Using a factory means env vars are read at call time, not import time,
+    which makes testing easier.
+    """
+    raw = mcp.http_app(path="/mcp", transport="streamable-http", stateless_http=True)
+
+    if AUTH_ENABLED:
+        # Wrap the raw app with auth using pure ASGI middleware,
+        # preserving lifespan for the Streamable HTTP session manager.
+        wrapped = BearerAuthMiddleware(raw)
+        wrapped.lifespan = raw.lifespan
+        return wrapped
+
+    return raw
+
+
+app = create_app()
 
 
 # ---------------------------------------------------------------------------
@@ -315,8 +330,11 @@ app.mount("/mcp", mcp.http_app())
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    if not MCP_API_TOKEN:
+        print("WARNING: MCP_API_TOKEN is not set. Server running WITHOUT auth.")
+
     print(f"Starting DDG Search MCP server on 0.0.0.0:{PORT}")
     print(f"  MCP endpoint:  http://0.0.0.0:{PORT}/mcp")
     print(f"  Health check:  http://0.0.0.0:{PORT}/health")
     print(f"  Auth enabled:  {AUTH_ENABLED}")
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(create_app(), host="0.0.0.0", port=PORT)
