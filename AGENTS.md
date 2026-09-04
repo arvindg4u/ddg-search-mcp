@@ -22,16 +22,23 @@ auth and health checks.  Deployed on Render.
 4. Type annotations define the JSON Schema input contract — use `str`, `int`,
    `Optional[str]`, etc.
 5. Clamp `max_results` or similar bounds inside the function.
-6. Use `_make_ddgs()` to get a configured DDGS instance.
-7. Sanitise results with `_safe_result()`.
+6. For search tools, call `_run_search(method, backend=..., **filters)` — it
+   reads the default backend from `DDGS_BACKEND`, retries transient failures,
+   and converts engine errors (403/ratelimit IP blocks, timeouts) into a
+   readable one-element error list instead of raising.  Do NOT call
+   `_make_ddgs()` directly from a tool.
+7. Sanitise results with `_safe_result()` (done inside `_run_search`).
 8. Add tests in `tests/test_server.py` — mock `server._make_ddgs`.
 9. Run tests: `pytest`
 
 ## Conventions
 
-- Camouflage private helpers with leading underscore: `_make_ddgs`, `_safe_result`.
+- Camouflage private helpers with leading underscore: `_make_ddgs`, `_safe_result`,
+  `_run_search`, `_classify_error`.
 - Clamp user-facing numeric params instead of raising errors on out-of-range.
-- Every tool returns `list[dict]` — never raise from inside a tool; let the
-  MCP client surface errors.
+- Every tool returns `list[dict]` — never raise from inside a tool; on failure
+  return `[{"error": ..., "reason": ..., "hint": ...}]` so the MCP client gets
+  a readable explanation (hosts on Render/Vercel often have blocked IPs —
+  surface that, don't hide it).
 - Descriptions are LLM-facing — be specific about supported operators
   (e.g. `filetype:`, `site:`), valid enum values, and defaults.

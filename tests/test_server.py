@@ -7,7 +7,16 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 from contextlib import asynccontextmanager
 
-from server import ddg_search, ddg_news, ddg_images, ddg_videos, ddg_fetch, create_app, _clamp
+from server import (
+    ddg_search,
+    ddg_news,
+    ddg_images,
+    ddg_videos,
+    ddg_fetch,
+    create_app,
+    _clamp,
+    _probe_backends,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +182,93 @@ def test_extra_keys_stripped(mock_factory):
 
 
 # ===================================================================
+# Resilience: IP-block / error handling (datacenter deployments)
+# ===================================================================
+
+@patch("server._make_ddgs")
+def test_ddg_search_blocked_returns_error_hint(mock_factory):
+    """A 403/ratelimit failure returns a readable error entry, never raises."""
+    from ddgs.exceptions import DDGSException
+
+    mock_factory.return_value.text.side_effect = DDGSException(
+        "RequestError: 403 Forbidden"
+    )
+    results = ddg_search(query="test")
+    assert isinstance(results, list) and len(results) == 1
+    err = results[0]
+    assert err["reason"] == "ip_blocked"
+    assert "DDGS_PROXY" in err["hint"]
+    assert "backend" in err
+
+
+@patch("server._make_ddgs")
+def test_ddg_search_timeout_retries_then_reports(mock_factory):
+    """Timeouts are retried once, then surfaced as a timeout error entry."""
+    from ddgs.exceptions import DDGSException
+
+    mock_factory.return_value.text.side_effect = DDGSException(
+        "RequestError: operation timed out"
+    )
+    with patch("server.time.sleep") as mock_sleep:
+        results = ddg_search(query="test")
+    assert mock_sleep.called  # retried
+    assert mock_factory.return_value.text.call_count == 2
+    assert results[0]["reason"] == "timeout"
+    assert "timed out" in results[0]["error"]
+
+
+@patch("server._make_ddgs")
+def test_ddg_search_blocked_not_retried(mock_factory):
+    """A hard IP block is not retried — it would just fail again."""
+    from ddgs.exceptions import DDGSException
+
+    mock_factory.return_value.text.side_effect = DDGSException(
+        "RequestError: 403 Forbidden"
+    )
+    results = ddg_search(query="test")
+    assert mock_factory.return_value.text.call_count == 1
+    assert results[0]["reason"] == "ip_blocked"
+
+
+@patch("server._make_ddgs")
+def test_ddg_news_network_error_returns_hint(mock_factory):
+    from ddgs.exceptions import DDGSException
+
+    mock_factory.return_value.news.side_effect = DDGSException(
+        "ConnectError: tls handshake eof"
+    )
+    with patch("server.time.sleep"):
+        results = ddg_news(query="test")
+    assert results[0]["reason"] == "network"
+    assert "/status" in results[0]["hint"]
+
+
+@patch("server._make_ddgs")
+def test_backend_param_passthrough(mock_factory):
+    """Callers can force a specific engine via the backend param."""
+    mock_factory.return_value.text.return_value = []
+    ddg_search(query="test", backend="bing")
+    assert mock_factory.return_value.text.call_args[1]["backend"] == "bing"
+
+
+@patch("server._make_ddgs")
+def test_backend_defaults_to_env(mock_factory, monkeypatch):
+    """DDGS_BACKEND env var sets the default backend when none is passed."""
+    monkeypatch.setenv("DDGS_BACKEND", "brave")
+    mock_factory.return_value.text.return_value = []
+    ddg_search(query="test")
+    assert mock_factory.return_value.text.call_args[1]["backend"] == "brave"
+
+
+@patch("server._make_ddgs")
+def test_backend_defaults_to_auto(mock_factory, monkeypatch):
+    monkeypatch.delenv("DDGS_BACKEND", raising=False)
+    mock_factory.return_value.text.return_value = []
+    ddg_search(query="test")
+    assert mock_factory.return_value.text.call_args[1]["backend"] == "auto"
+
+
+# ===================================================================
 # Integration tests
 # ===================================================================
 
@@ -185,6 +281,46 @@ async def test_health_check():
             resp = await client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+@patch("server._make_ddgs")
+def test_probe_backends_reports_ok_and_failures(mock_factory):
+    """The status probe reports per-engine ok/blocked state."""
+    from ddgs.exceptions import DDGSException
+
+    fake_engines = {"text": {"duckduckgo": object(), "brave": object()}}
+    ddgs_mock = mock_factory.return_value
+
+    def fake_text(query, backend, max_results):
+        if backend == "duckduckgo":
+            raise DDGSException("RequestError: 403 Forbidden")
+        return [{"title": "x"}]
+
+    ddgs_mock.text.side_effect = fake_text
+    with patch("ddgs.engines.ENGINES", fake_engines):
+        report = _probe_backends(["text"])
+
+    assert report["text"]["duckduckgo"]["ok"] is False
+    assert report["text"]["duckduckgo"]["reason"] == "ip_blocked"
+    assert report["text"]["brave"]["ok"] is True
+    assert report["text"]["brave"]["results"] == 1
+
+
+@pytest.mark.asyncio
+async def test_status_endpoint():
+    """GET /status returns the probe report (no auth configured here)."""
+    app = create_app()
+    canned = {"text": {"brave": {"ok": True, "results": 1}}}
+    async with _lifespan(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            with patch("server._probe_backends", return_value=canned):
+                resp = await client.get("/status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["backends"] == canned
+    assert body["service"] == "ddg-search-mcp"
+    assert "note" in body
 
 
 @pytest.mark.asyncio
@@ -213,10 +349,14 @@ async def test_mcp_tools_list():
 # ===================================================================
 
 @patch("server.httpx.Client")
+@patch("server.trafilatura.extract_metadata")
 @patch("server.trafilatura.extract")
-def test_ddg_fetch_basic(mock_extract, mock_client):
+def test_ddg_fetch_basic(mock_extract, mock_meta, mock_client):
     """Mock HTTP and trafilatura to test ddg_fetch logic."""
     mock_extract.return_value = "Extracted article content here."
+    mock_metadata = MagicMock()
+    mock_metadata.title = "Real Page Title"
+    mock_meta.return_value = mock_metadata
     mock_response = MagicMock()
     mock_response.text = "<html><title>Test Page</title><body>Content</body></html>"
     mock_response.content = b"<html><body>Content</body></html>"
@@ -227,9 +367,30 @@ def test_ddg_fetch_basic(mock_extract, mock_client):
 
     result = ddg_fetch(url="https://example.com/page")
 
-    assert result["title"] == "Extracted article content here."
+    # Title comes from metadata, NOT the full extracted text (old bug).
+    assert result["title"] == "Real Page Title"
+    assert result["text"] == "Extracted article content here."
     assert result["url"] == "https://example.com/page"
     assert result["content_type"] == "text/html"
+
+
+@patch("server.httpx.Client")
+@patch("server.trafilatura.extract_metadata")
+@patch("server.trafilatura.extract")
+def test_ddg_fetch_title_falls_back_to_title_tag(mock_extract, mock_meta, mock_client):
+    """When trafilatura metadata is missing, use the <title> tag."""
+    mock_extract.return_value = "Content body."
+    mock_meta.return_value = None
+    mock_response = MagicMock()
+    mock_response.text = "<html><title>Fallback Title</title><body>x</body></html>"
+    mock_response.content = b"<html></html>"
+    mock_response.url = "https://example.com"
+    mock_response.headers = {"content-type": "text/html"}
+    mock_response.raise_for_status = MagicMock()
+    mock_client.return_value.__enter__.return_value.get.return_value = mock_response
+
+    result = ddg_fetch(url="https://example.com")
+    assert result["title"] == "Fallback Title"
 
 
 @patch("server.httpx.Client")
