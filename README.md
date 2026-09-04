@@ -14,7 +14,47 @@ An [MCP](https://modelcontextprotocol.io/) server that brings DuckDuckGo search 
 | `ddg_videos` | Video search (aggregates YouTube, Bing Videos, etc.) |
 | `ddg_fetch` | **NEW** — Fetch a URL and extract readable content (article body, headings, metadata). Uses [trafilatura](https://trafilatura.readthedocs.io/) to strip navigation, ads, and boilerplate. |
 
-Every search tool supports `region` (e.g. `us-en`, `uk-en`, `wt-wt`), `safesearch` (`on` / `moderate` / `off`), and time-limit filters.
+Every search tool supports `region` (e.g. `us-en`, `uk-en`, `wt-wt`), `safesearch` (`on` / `moderate` / `off`), time-limit filters, and a `backend` parameter to pick or force a search engine.
+
+## Troubleshooting: searches fail on Render / Vercel / Heroku
+
+**Symptom:** works locally, but deployed searches return errors like
+`403 Forbidden`, `202 Ratelimit`, or connection failures.
+
+**Cause:** search engines — DuckDuckGo especially — routinely block or
+ratelimit requests from **datacenter IPs**. Managed platforms (Render, Vercel,
+Heroku, AWS, GCP…) egress from shared datacenter ranges that are frequently
+flagged. This is an IP-reputation problem, not a bug in the server.
+
+**Fixes, in order of effectiveness:**
+
+1. **Check what works from your host** — hit the diagnostic endpoint:
+   ```bash
+   curl -H "Authorization: Bearer $MCP_API_TOKEN" \
+        "https://ddg-search-mcp.onrender.com/status?category=text"
+   ```
+   It probes every engine (duckduckgo, brave, google, bing, …) with a
+   1-result query and reports `ok: true/false` plus a `reason` for each.
+
+2. **Use a backend that isn't blocked.** Every search tool takes a `backend`
+   parameter — ask your AI client to retry with `backend="bing"` (news,
+   images) or another engine reported `ok` by `/status`. You can also set a
+   server-wide default with the `DDGS_BACKEND` env var. With the default
+   `backend="auto"`, the `ddgs` library already fans out across engines and
+   uses whichever responds.
+
+3. **Route egress through a proxy** — set `DDGS_PROXY` (HTTP/HTTPS/SOCKS5, or
+   `"tb"` for Tor). A residential or rotating proxy service makes requests
+   look like home users and is the most reliable fix for blocked hosts.
+
+4. **Don't deploy to Vercel.** This is a long-running HTTP server; Vercel is
+   serverless with short function timeouts and heavily-shared egress IPs —
+   both the MCP transport and the search engines will misbehave. Use Render,
+   Railway, Fly.io, or run it locally.
+
+When a search fails, tools return a single-entry list with `error`, `reason`
+(e.g. `ip_blocked`, `timeout`, `network`), and a `hint` your AI client can
+read and relay — instead of an opaque stack trace.
 
 ## Quick Start
 
@@ -126,8 +166,13 @@ To enable it:
 |----------|---------|-------------|
 | `PORT` | `10000` | Server port |
 | `MCP_API_TOKEN` | *(none)* | Bearer token for authentication (unset = no auth) |
-| `DDGS_TIMEOUT` | `10` | DuckDuckGo request timeout in seconds |
-| `DDGS_PROXY` | *(none)* | Proxy URL (http/https/socks5) or `"tb"` for Tor |
+| `DDGS_TIMEOUT` | `10` | Search request timeout in seconds |
+| `DDGS_PROXY` | *(none)* | Proxy URL (http/https/socks5) or `"tb"` for Tor — use this when the host IP is blocked |
+| `DDGS_BACKEND` | `auto` | Default search engine for all tools (`auto`, `duckduckgo`, `bing`, `brave`, …) |
+
+Diagnostic endpoints: `GET /health` (public, for platform health checks) and
+`GET /status` (auth-protected; probes every engine from the host — see
+[Troubleshooting](#troubleshooting-searches-fail-on-render--vercel--heroku)).
 
 ## Architecture
 

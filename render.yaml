@@ -17,5 +17,7 @@ services:
         generateValue: true
       - key: DDGS_TIMEOUT
         value: 10
+      - key: DDGS_BACKEND
+        sync: false  # set in dashboard (e.g. "bing") if duckduckgo is IP-blocked
       - key: PORT
         value: 10000
